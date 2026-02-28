@@ -6,10 +6,20 @@ import os
 SCREEN_WIDTH, SCREEN_HEIGHT = 1200, 850
 TILE_WIDTH, TILE_HEIGHT = 50, 70
 GRID_X, GRID_Y = 55, 75
-BOARD_BOUNDARY = 500
-RACK_START_Y = 600
+BOARD_BOUNDARY = 620
+RACK_START_Y = 660
 COLORS = [(220, 30, 30), (30, 30, 220), (220, 180, 0), (20, 20, 20)]
 BG_COLOR = (34, 139, 34)
+
+# --- IMAGE LOADING SETUP ---
+COLOR_NAMES = {
+    (220, 30, 30): "red",
+    (30, 30, 220): "blue",
+    (220, 180, 0): "yellow",
+    (20, 20, 20): "black",
+    (255, 255, 255): "joker"
+}
+TILE_IMAGES = {}
 
 class Tile:
     def __init__(self, number, color_val, x, y, owner):
@@ -18,6 +28,7 @@ class Tile:
         self.rect = pygame.Rect(x, y, TILE_WIDTH, TILE_HEIGHT)
         self.dragging = False
         self.owner = owner  # 0: Board, 1: P1, 2: Bot
+        self.is_invisible = False
 
     def snap(self):
         self.rect.x = round(self.rect.x / GRID_X) * GRID_X
@@ -26,27 +37,40 @@ class Tile:
         self.rect.y = max(0, min(self.rect.y, SCREEN_HEIGHT - TILE_HEIGHT))
 
     def draw(self, screen, font, alpha=255):
-        surf = pygame.Surface((TILE_WIDTH, TILE_HEIGHT), pygame.SRCALPHA)
-        bg_col = (255, 255, 255, alpha) if not self.dragging else (200, 200, 200, alpha)
-        pygame.draw.rect(surf, bg_col, (0, 0, TILE_WIDTH, TILE_HEIGHT), border_radius=5)
-        pygame.draw.rect(surf, (0, 0, 0, alpha), (0, 0, TILE_WIDTH, TILE_HEIGHT), 2, border_radius=5)
+        if self.is_invisible:
+            return
+
+        img = TILE_IMAGES.get((self.number, self.color_val))
         
-        # --- JOKER RENDERING ---
-        if self.number == 0:
-            text = font.render("J", True, (0, 0, 0, alpha))
+        if img:
+            current_alpha = 150 if self.dragging else alpha
+            if current_alpha != 255:
+                temp_img = img.copy()
+                temp_img.set_alpha(current_alpha)
+                screen.blit(temp_img, self.rect)
+            else:
+                screen.blit(img, self.rect)
         else:
-            text_col = list(self.color_val) + [alpha]
-            text = font.render(str(self.number), True, text_col)
+            surf = pygame.Surface((TILE_WIDTH, TILE_HEIGHT), pygame.SRCALPHA)
+            bg_col = (255, 255, 255, alpha) if not self.dragging else (200, 200, 200, alpha)
+            pygame.draw.rect(surf, bg_col, (0, 0, TILE_WIDTH, TILE_HEIGHT), border_radius=5)
+            pygame.draw.rect(surf, (0, 0, 0, alpha), (0, 0, TILE_WIDTH, TILE_HEIGHT), 2, border_radius=5)
             
-        text_rect = text.get_rect(center=(TILE_WIDTH // 2, TILE_HEIGHT // 2))
-        surf.blit(text, text_rect)
-        screen.blit(surf, self.rect)
+            if self.number == 0:
+                text = font.render("J", True, (0, 0, 0, alpha))
+            else:
+                text_col = list(self.color_val) + [alpha]
+                text = font.render(str(self.number), True, text_col)
+                
+            text_rect = text.get_rect(center=(TILE_WIDTH // 2, TILE_HEIGHT // 2))
+            surf.blit(text, text_rect)
+            screen.blit(surf, self.rect)
 
 def find_nearest_empty_spot(target_tile, all_tiles, start_x=None, start_y=None):
     if start_x is not None: target_tile.rect.x = start_x
     if start_y is not None: target_tile.rect.y = start_y
     target_tile.snap()
-    occupied = {(t.rect.x, t.rect.y) for t in all_tiles if t != target_tile and t.owner == 0}
+    occupied = {(t.rect.x, t.rect.y) for t in all_tiles if t != target_tile and (t.owner == 0 or getattr(t, 'is_invisible', False))}
     if (target_tile.rect.x, target_tile.rect.y) not in occupied and target_tile.rect.y < BOARD_BOUNDARY:
         return target_tile.rect.x, target_tile.rect.y
     sx, sy = target_tile.rect.x, target_tile.rect.y
@@ -60,15 +84,13 @@ def find_nearest_empty_spot(target_tile, all_tiles, start_x=None, start_y=None):
     return sx, sy
 
 def validate_group(group):
-    """Seamlessly handles Jokers (number 0) acting as wildcards."""
     if len(group) < 3: return False
     
     jokers = [t for t in group if t.number == 0]
     normals = [t for t in group if t.number != 0]
 
-    if not normals: return True # Rare case of all jokers
+    if not normals: return True 
 
-    # --- SET CHECK ---
     is_set = True
     if len(group) > 4: 
         is_set = False
@@ -79,7 +101,6 @@ def validate_group(group):
         if len(colors) != len(set(colors)): is_set = False
     if is_set: return True
 
-    # --- RUN CHECK ---
     is_run = True
     if len(group) > 13: 
         is_run = False
@@ -90,7 +111,7 @@ def validate_group(group):
         else:
             nums = sorted([t.number for t in normals])
             if len(nums) != len(set(nums)): 
-                is_run = False # Duplicates break a run
+                is_run = False 
             else:
                 span = nums[-1] - nums[0] + 1
                 missing_internals = span - len(nums)
@@ -101,7 +122,7 @@ def validate_group(group):
     return False
 
 def get_all_board_groups(tiles):
-    board_tiles = [t for t in tiles if t.owner == 0]
+    board_tiles = [t for t in tiles if t.owner == 0 and not getattr(t, 'is_invisible', False)]
     groups, rows = [], {}
     for t in board_tiles: rows.setdefault(t.rect.y, []).append(t)
     for y in sorted(rows.keys()):
@@ -133,6 +154,20 @@ def main():
     font = pygame.font.SysFont("Arial", 22, bold=True)
     title_font = pygame.font.SysFont("Arial", 60, bold=True)
 
+    if not os.path.exists("tiles"):
+        os.makedirs("tiles")
+        
+    for color_val, color_name in COLOR_NAMES.items():
+        if color_name == "joker":
+            path = os.path.join("tiles", "joker.png")
+            if os.path.exists(path):
+                TILE_IMAGES[(0, color_val)] = pygame.transform.scale(pygame.image.load(path).convert_alpha(), (TILE_WIDTH, TILE_HEIGHT))
+        else:
+            for n in range(1, 14):
+                path = os.path.join("tiles", f"{color_name}_{n}.png")
+                if os.path.exists(path):
+                    TILE_IMAGES[(n, color_val)] = pygame.transform.scale(pygame.image.load(path).convert_alpha(), (TILE_WIDTH, TILE_HEIGHT))
+
     state, previous_state = "MENU", "MENU"
     current_player, player_initials = 1, {1: False, 2: False}
     
@@ -148,7 +183,7 @@ def main():
     current_plan_sig = None
 
     def sort_hand(p_id):
-        p_tiles = [t for t in tiles_in_play if t.owner == p_id]
+        p_tiles = [t for t in tiles_in_play if t.owner == p_id and not getattr(t, 'is_invisible', False)]
         p_tiles.sort(key=lambda x: (COLORS.index(x.color_val) if x.color_val in COLORS else 99, x.number))
         for i, t in enumerate(p_tiles):
             t.rect.x, t.rect.y = 50 + ((i % 18) * GRID_X), RACK_START_Y + ((i // 18) * GRID_Y)
@@ -157,7 +192,7 @@ def main():
     def reset_game():
         nonlocal pool, tiles_in_play, ghost_data, turn_checkpoint, current_player, player_initials, status_msg, failed_attempts, current_plan_sig
         pool = [(n, c) for c in COLORS for n in range(1, 14) for _ in range(2)]
-        pool.extend([(0, (255, 255, 255)), (0, (255, 255, 255))]) # Jokers added
+        pool.extend([(0, (255, 255, 255)), (0, (255, 255, 255))])
         random.shuffle(pool)
         
         tiles_in_play.clear()
@@ -171,13 +206,42 @@ def main():
 
     def restore_board(snapshot, p_id):
         for t in tiles_in_play:
-            if t.owner == 0: t.owner = p_id
+            if t.owner == 0 and not getattr(t, 'is_invisible', False): t.owner = p_id
         for num, col, x, y in snapshot:
             t = next((tt for tt in tiles_in_play if tt.owner == p_id and tt.number == num and tt.color_val == col), None)
             if t: t.owner, t.rect.x, t.rect.y = 0, x, y
         sort_hand(p_id)
 
-    def capture_snapshot(): return [(t.number, t.color_val, t.rect.x, t.rect.y) for t in tiles_in_play if t.owner == 0]
+    def capture_snapshot(): return [(t.number, t.color_val, t.rect.x, t.rect.y) for t in tiles_in_play if t.owner == 0 and not getattr(t, 'is_invisible', False)]
+
+    def remove_invisible_buffers():
+        nonlocal tiles_in_play
+        tiles_in_play = [t for t in tiles_in_play if not getattr(t, 'is_invisible', False)]
+
+    def apply_invisible_buffers():
+        remove_invisible_buffers()
+        board_tiles = [t for t in tiles_in_play if t.owner == 0]
+        rows = {}
+        for t in board_tiles: rows.setdefault(t.rect.y, []).append(t)
+        
+        def add_buf(cur_group, curr_y):
+            lt = Tile(-1, (0,0,0), cur_group[0].rect.x - GRID_X, curr_y, 3)
+            lt.is_invisible = True
+            rt = Tile(-1, (0,0,0), cur_group[-1].rect.x + GRID_X, curr_y, 3)
+            rt.is_invisible = True
+            tiles_in_play.extend([lt, rt])
+
+        for y, r_tiles in rows.items():
+            r_tiles = sorted(r_tiles, key=lambda t: t.rect.x)
+            if not r_tiles: continue
+            cur = [r_tiles[0]]
+            for i in range(1, len(r_tiles)):
+                if r_tiles[i].rect.x == r_tiles[i-1].rect.x + GRID_X:
+                    cur.append(r_tiles[i])
+                else:
+                    add_buf(cur, y)
+                    cur = [r_tiles[i]]
+            add_buf(cur, y)
 
     running = True
     while running:
@@ -185,14 +249,14 @@ def main():
         
         if state == "PLAYING" and current_player == 2:
             if ai_phase == "IDLE":
+                remove_invisible_buffers()
                 ai_timer, ai_phase = pygame.time.get_ticks(), "THINKING"
                 turn_checkpoint = capture_snapshot()
             
             elif ai_phase == "THINKING" and pygame.time.get_ticks() - ai_timer > 1000:
-                available = [t for t in tiles_in_play if t.owner in [0, 2]]
+                available = [t for t in tiles_in_play if t.owner in [0, 2] and not getattr(t, 'is_invisible', False)]
                 hand = [t for t in tiles_in_play if t.owner == 2]
                 
-                # --- BOT ALGORITHM TO FIND GROUPS (INCLUDES JOKERS) ---
                 def find_groups(tile_pool):
                     found = []
                     temp_pool = list(tile_pool)
@@ -230,12 +294,10 @@ def main():
                                 if ut in temp_pool: temp_pool.remove(ut)
                     return found
 
-                # STRATEGY 1: Hand Only
                 planned = find_groups(hand)
                 hand_used = [t for g in planned for t in g if t.owner == 2]
                 bot_pts = sum((30 if t.number == 0 else t.number) for t in hand_used)
                 
-                # STRATEGY 2: Hand + Board Manipulation (Only if Hand-Only fails or 30pts already met)
                 if (not player_initials[2] and bot_pts < 30) or not planned:
                     planned_manip = find_groups(available)
                     hand_used_manip = [t for g in planned_manip for t in g if t.owner == 2]
@@ -246,10 +308,9 @@ def main():
                         hand_used = hand_used_manip
                         bot_pts = pts_manip
 
-                # CHECK AGAINST FAILED MEMORY
                 planned_sig = tuple(sorted([(t.number, t.color_val) for g in planned for t in g]))
                 if planned_sig in failed_attempts:
-                    planned = [] # Skip this plan if it previously crashed the board
+                    planned = []
                 else:
                     current_plan_sig = planned_sig
 
@@ -269,13 +330,13 @@ def main():
                     ai_timer = pygame.time.get_ticks()
                 else:
                     board_now = capture_snapshot()
-                    added_from_hand = [t for t in tiles_in_play if t.owner == 0 and (t.number, t.color_val, t.rect.x, t.rect.y) not in {(n,c,x,y) for n,c,x,y in ghost_data}]
+                    added_from_hand = [t for t in tiles_in_play if t.owner == 0 and not getattr(t, 'is_invisible', False) and (t.number, t.color_val, t.rect.x, t.rect.y) not in {(n,c,x,y) for n,c,x,y in ghost_data}]
                     
-                    # FINAL TURN VALIDATION
                     if len(added_from_hand) > 0 and all(validate_group(g) for g in get_all_board_groups(tiles_in_play)):
                         player_initials[2] = True; ghost_data = board_now
                         status_msg = "Bot Turn Over"
-                        failed_attempts.clear() # Reset memory on success
+                        failed_attempts.clear()
+                        apply_invisible_buffers() 
                     else:
                         if current_plan_sig is not None and current_plan_sig not in failed_attempts:
                             failed_attempts.append(current_plan_sig)
@@ -286,6 +347,7 @@ def main():
                             tiles_in_play.append(Tile(n, c, 0, 0, 2))
                             sort_hand(2)
                         status_msg = "Bot Draw (No new tiles/Invalid)"
+                        apply_invisible_buffers()
                     current_player, ai_phase = 1, "IDLE"
 
         for event in pygame.event.get():
@@ -307,22 +369,23 @@ def main():
                     if btns["reset"].collidepoint(event.pos): restore_board(ghost_data, 1)
                     if btns["draw"].collidepoint(event.pos) and pool:
                         restore_board(ghost_data, 1); n, c = pool.pop(); tiles_in_play.append(Tile(n, c, 0, 0, 1))
-                        sort_hand(1); ghost_data = capture_snapshot(); current_player = 2
+                        sort_hand(1); ghost_data = capture_snapshot(); apply_invisible_buffers(); current_player = 2
                     if btns["pass"].collidepoint(event.pos):
                         groups = get_all_board_groups(tiles_in_play)
-                        new_t = [t for t in tiles_in_play if t.owner == 0 and (t.number, t.color_val, t.rect.x, t.rect.y) not in {(n,c,x,y) for n,c,x,y in ghost_data}]
+                        new_t = [t for t in tiles_in_play if t.owner == 0 and not getattr(t, 'is_invisible', False) and (t.number, t.color_val, t.rect.x, t.rect.y) not in {(n,c,x,y) for n,c,x,y in ghost_data}]
                         
                         p1_pts = sum((30 if t.number == 0 else t.number) for t in new_t)
                         
                         if len(new_t) > 0 and all(validate_group(g) for g in groups) and (player_initials[1] or p1_pts >= 30):
-                            player_initials[1] = True; ghost_data = capture_snapshot(); current_player = 2
+                            player_initials[1] = True; ghost_data = capture_snapshot(); apply_invisible_buffers(); current_player = 2
                         else: 
                             restore_board(ghost_data, 1)
                             if pool:
                                 n, c = pool.pop(); tiles_in_play.append(Tile(n, c, 0, 0, 1)); sort_hand(1)
-                            ghost_data = capture_snapshot(); current_player = 2
+                            ghost_data = capture_snapshot(); apply_invisible_buffers(); current_player = 2
                     for t in reversed(tiles_in_play):
-                        if t.rect.collidepoint(event.pos) and t.owner in [0, 1]:
+                        if t.rect.collidepoint(event.pos) and t.owner in [0, 1] and not getattr(t, 'is_invisible', False):
+                            remove_invisible_buffers()
                             selected_tile = t; t.dragging = True; off_x, off_y = t.rect.x - event.pos[0], t.rect.y - event.pos[1]
                             tiles_in_play.remove(t); tiles_in_play.append(t); break
             if event.type == pygame.MOUSEBUTTONUP and selected_tile:
@@ -342,12 +405,22 @@ def main():
         elif state == "RULES":
             header = title_font.render("GAME RULES", True, (255, 255, 0))
             screen.blit(header, header.get_rect(center=(SCREEN_WIDTH // 2, 80)))
-            r_list = ["- The first play must total at least 30 points.", "- Sets: 3+ tiles of same number, different colors.", "- Runs: 3+ consecutive numbers of same color.", "- Jokers: Replace any tile. Worth 30 pts for initial drop.", "- A player will auto-draw if they fail to play NEW tiles legally.", "- Bot remembers failed moves to improve strategy."]
+            r_list = [
+                "1. Each player starts with 14 tiles.",
+                "2. Drag the tiles to the board to play them.",
+                "3. First play must be worth 30+ points.",
+                "4. All plays must be sets or runs.",
+                "5. Sets are 3+ tiles of same number, but different colors. No duplicate tiles are allowed.",
+                "6. Runs are 3+ tiles of consecutive numbers with the same color.",
+                "7. Jokers are wild and can be used in sets or runs if you are missing a number.",
+                "8. You are allowed to manipulate all tiles on the board as long as the end result is legal.",
+                "9. A legal board means every tile is in a set or run with no mistakes."
+            ]
             cy = 160
             for line in r_list: cy = draw_wrapped_text(screen, line, 100, cy, 1000, 35, font); cy += 10
             pygame.draw.rect(screen, (200, 50, 50), back_btn_rect, border_radius=8); screen.blit(font.render("BACK", True, (255,255,255)), (130, 52))
         elif state in ["PLAYING", "PAUSED"]:
-            pygame.draw.rect(screen, (20, 80, 20), (0, BOARD_BOUNDARY, SCREEN_WIDTH, 350))
+            pygame.draw.rect(screen, (20, 80, 20), (0, BOARD_BOUNDARY, SCREEN_WIDTH, SCREEN_HEIGHT - BOARD_BOUNDARY))
             for n, c, x, y in ghost_data: Tile(n, c, x, y, 0).draw(screen, font, 60)
             
             p1_active = current_player == 1
