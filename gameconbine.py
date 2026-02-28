@@ -79,7 +79,6 @@ def get_all_board_groups(tiles):
 
         current_group = [row_tiles[0]]
         for i in range(1, len(row_tiles)):
-            # If tiles are adjacent on the grid, they belong to the same group
             if row_tiles[i].rect.x == row_tiles[i - 1].rect.x + GRID_X:
                 current_group.append(row_tiles[i])
             else:
@@ -115,8 +114,8 @@ def main():
     big_font = pygame.font.SysFont("Arial", 40, bold=True)
     title_font = pygame.font.SysFont("Arial", 50, bold=True)
 
-    # --- Menu / Rules state ---
-    state = "MENU"
+    # --- Menu / Rules / Pause states ---
+    state = "MENU"  # MENU, RULES, PLAYING, PAUSED
     menu_btns = {
         "play": pygame.Rect(SCREEN_WIDTH // 2 - 100, 350, 200, 60),
         "rules": pygame.Rect(SCREEN_WIDTH // 2 - 100, 430, 200, 60),
@@ -124,14 +123,22 @@ def main():
     }
     back_btn = pygame.Rect(50, 40, 220, 50)
 
-    # --- Game variables (gamev2 style) ---
+    # Pause menu buttons (visible when state == "PAUSED")
+    pause_btns = {
+        "resume": pygame.Rect(SCREEN_WIDTH // 2 - 120, 280, 240, 60),
+        "restart": pygame.Rect(SCREEN_WIDTH // 2 - 120, 360, 240, 60),
+        "rules": pygame.Rect(SCREEN_WIDTH // 2 - 120, 440, 240, 60),
+        "home": pygame.Rect(SCREEN_WIDTH // 2 - 120, 520, 240, 60),
+    }
+
+    # --- Game variables ---
     btns = {k: pygame.Rect(1030, 540 + i * 60, 140, 45)
             for i, k in enumerate(["draw", "sort", "reset", "pass"])}
     pool = [(n, c) for c in COLORS for n in range(1, 14) for _ in range(2)]
     random.shuffle(pool)
 
     tiles_in_play = []
-    ghost_data = []
+    ghost_data = []      # last legal board snapshot (only board tiles)
     current_player = 1
     player_initials = {1: False, 2: False}
     status_msg = "P1: Lay 30 pts or Draw"
@@ -140,79 +147,97 @@ def main():
     off_y = 0
     game_started = False
 
-    def sort_hand(p_id):
+    # sort-mode popup controls
+    sort_mode_select = False
+    sort_btn_number = pygame.Rect(400, 300, 160, 60)
+    sort_btn_color = pygame.Rect(640, 300, 160, 60)
+
+    # ---- helper functions ----
+
+    def sort_hand(p_id, mode="number"):
         p_tiles = [t for t in tiles_in_play if t.owner == p_id]
-        p_tiles.sort(key=lambda x: (x.color_val, x.number))
+        if mode == "number":
+            p_tiles.sort(key=lambda x: (x.number, x.color_val))
+        else:
+            p_tiles.sort(key=lambda x: (x.color_val, x.number))
         for i, t in enumerate(p_tiles):
             t.rect.x, t.rect.y = 50 + ((i % 18) * GRID_X), RACK_START_Y + ((i // 18) * GRID_Y)
             t.snap()
 
-    def reset_logic():
-        nonlocal tiles_in_play
-        # Move tiles placed this turn back to hand
-        for t in tiles_in_play:
-            if t.owner == 0:
-                is_old = any(
-                    t.number == g[0]
-                    and t.color_val == g[1]
-                    and t.rect.topleft == (g[2], g[3])
-                    for g in ghost_data
-                )
-                if not is_old:
-                    t.owner = current_player
-        # Re-position tiles that were already on board
-        for g in ghost_data:
-            t = next(
-                (x for x in tiles_in_play if x.number == g[0] and x.color_val == g[1] and x.owner != 0),
-                None,
-            )
-            if t:
-                t.owner = 0
-                t.rect.topleft = (g[2], g[3])
-        sort_hand(current_player)
+    def reset_pool_and_hands():
+        nonlocal pool, tiles_in_play, ghost_data, current_player, player_initials, status_msg
+        pool = [(n, c) for c in COLORS for n in range(1, 14) for _ in range(2)]
+        random.shuffle(pool)
+        tiles_in_play.clear()
+        ghost_data = []
+        current_player = 1
+        player_initials = {1: False, 2: False}
+        status_msg = "P1: Lay 30 pts or Draw"
 
     def deal_initial_hands():
+        """Deal 14 tiles to each player and reset board snapshot."""
         nonlocal ghost_data
+        tiles_in_play.clear()
         for p in [1, 2]:
             for _ in range(14):
                 n, c = pool.pop()
                 tiles_in_play.append(Tile(n, c, 0, 0, p))
-            sort_hand(p)
-        ghost_data = [(t.number, t.color_val, t.rect.x, t.rect.y)
-                      for t in tiles_in_play if t.owner == 0]
+            sort_hand(p, "number")
+        ghost_data = []  # empty board at the very start
+
+    def snapshot_board():
+        """Save current board layout (only board tiles)."""
+        return [(t.number, t.color_val, t.rect.x, t.rect.y)
+                for t in tiles_in_play if t.owner == 0]
+
+    def restore_board_from_snapshot(snapshot):
+        """
+        Restore board to previous legal snapshot and return all
+        non-snapshot board tiles to current player's hand.
+        """
+        for t in tiles_in_play:
+            if t.owner == 0:
+                t.owner = current_player
+
+        for num, col, x, y in snapshot:
+            t = next(
+                (tt for tt in tiles_in_play
+                 if tt.owner == current_player and tt.number == num and tt.color_val == col),
+                None
+            )
+            if t:
+                t.owner = 0
+                t.rect.x = x
+                t.rect.y = y
+
+        sort_hand(current_player, "number")
 
     def find_nearest_empty_grid(tile):
-        """Find nearest empty snapped grid cell and move tile there."""
-        # current snapped grid
+        """Find nearest empty snapped grid cell and return (x, y)."""
         base_x = tile.rect.x
         base_y = tile.rect.y
 
-        # Build a quick set of occupied positions (by other tiles)
         occupied = set()
         for t in tiles_in_play:
             if t is tile:
                 continue
             occupied.add((t.rect.x, t.rect.y))
 
-        # If current position is free, keep it
         if (base_x, base_y) not in occupied:
             return base_x, base_y
 
-        # BFS-like search over expanding "rings" of grid offsets
-        max_radius = 20  # safety bound
+        max_radius = 20
         best_pos = None
         best_dist_sq = None
 
         for r in range(1, max_radius + 1):
-            # explore positions at Chebyshev distance r
             for dx in range(-r, r + 1):
                 for dy in range(-r, r + 1):
                     if max(abs(dx), abs(dy)) != r:
-                        continue  # only outer ring for this radius
+                        continue
                     x = base_x + dx * GRID_X
                     y = base_y + dy * GRID_Y
 
-                    # Boundaries
                     if x < 0 or x > SCREEN_WIDTH - TILE_WIDTH:
                         continue
                     if y < 0 or y > SCREEN_HEIGHT - TILE_HEIGHT:
@@ -221,7 +246,6 @@ def main():
                     if (x, y) in occupied:
                         continue
 
-                    # distance squared from original snapped cell
                     dist_sq = dx * dx + dy * dy
                     if best_pos is None or dist_sq < best_dist_sq:
                         best_pos = (x, y)
@@ -230,7 +254,6 @@ def main():
             if best_pos is not None:
                 break
 
-        # If nothing found (should not happen), use original
         if best_pos is None:
             return base_x, base_y
         return best_pos
@@ -242,13 +265,20 @@ def main():
             if event.type == pygame.QUIT:
                 running = False
 
+            # global pause toggle (Esc) when playing
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                if state == "PLAYING":
+                    state = "PAUSED"
+                elif state == "PAUSED":
+                    state = "PLAYING"
+
             # --- MENU ---
             if state == "MENU":
                 if event.type == pygame.MOUSEBUTTONDOWN:
                     if menu_btns["play"].collidepoint(event.pos):
-                        if not game_started:
-                            deal_initial_hands()
-                            game_started = True
+                        reset_pool_and_hands()
+                        deal_initial_hands()
+                        game_started = True
                         state = "PLAYING"
                     elif menu_btns["rules"].collidepoint(event.pos):
                         state = "RULES"
@@ -261,84 +291,95 @@ def main():
                     if back_btn.collidepoint(event.pos):
                         state = "MENU"
 
+            # --- PAUSED ---
+            elif state == "PAUSED":
+                if event.type == pygame.MOUSEBUTTONDOWN:
+                    if pause_btns["resume"].collidepoint(event.pos):
+                        state = "PLAYING"
+                    elif pause_btns["restart"].collidepoint(event.pos):
+                        reset_pool_and_hands()
+                        deal_initial_hands()
+                        state = "PLAYING"
+                    elif pause_btns["rules"].collidepoint(event.pos):
+                        state = "RULES"
+                    elif pause_btns["home"].collidepoint(event.pos):
+                        state = "MENU"
+
             # --- PLAYING ---
             elif state == "PLAYING":
                 if event.type == pygame.MOUSEBUTTONDOWN:
-                    # sort
-                    if btns["sort"].collidepoint(event.pos):
-                        sort_hand(current_player)
-
-                    # reset
-                    if btns["reset"].collidepoint(event.pos):
-                        reset_logic()
-
-                    # draw
-                    if btns["draw"].collidepoint(event.pos) and pool:
-                        reset_logic()
-                        n, c = pool.pop()
-                        tiles_in_play.append(Tile(n, c, 50, RACK_START_Y, current_player))
-                        current_player = 3 - current_player
-                        sort_hand(current_player)
-                        ghost_data = [
-                            (t.number, t.color_val, t.rect.x, t.rect.y)
-                            for t in tiles_in_play if t.owner == 0
-                        ]
-
-                    # pass
-                    if btns["pass"].collidepoint(event.pos):
-                        all_groups = get_all_board_groups(tiles_in_play)
-                        is_board_valid = all(validate_group(g) for g in all_groups)
-
-                        # Point calculation for ONLY the new tiles placed
-                        new_pts = sum(
-                            t.number
-                            for t in tiles_in_play
-                            if t.owner == 0
-                            and not any(
-                                t.number == g[0]
-                                and t.color_val == g[1]
-                                and t.rect.topleft == (g[2], g[3])
-                                for g in ghost_data
-                            )
-                        )
-
-                        if not is_board_valid:
-                            status_msg = "Invalid Board! Rearrangement failed."
-                            reset_logic()
-                        elif not player_initials[current_player] and new_pts < 30:
-                            status_msg = f"First move needs 30 pts! ({new_pts}/30)"
-                            reset_logic()
+                    # sort mode popup
+                    if sort_mode_select:
+                        if sort_btn_number.collidepoint(event.pos):
+                            sort_hand(current_player, "number")
+                            sort_mode_select = False
+                        elif sort_btn_color.collidepoint(event.pos):
+                            sort_hand(current_player, "color")
+                            sort_mode_select = False
                         else:
-                            if new_pts >= 30:
-                                player_initials[current_player] = True
-                            # Commit the board rearrange to memory
-                            ghost_data = [
-                                (t.number, t.color_val, t.rect.x, t.rect.y)
-                                for t in tiles_in_play if t.owner == 0
-                            ]
+                            sort_mode_select = False
+                    else:
+                        # normal buttons
+                        if btns["sort"].collidepoint(event.pos):
+                            sort_mode_select = True
+
+                        if btns["reset"].collidepoint(event.pos):
+                            restore_board_from_snapshot(ghost_data)
+
+                        if btns["draw"].collidepoint(event.pos) and pool:
+                            restore_board_from_snapshot(ghost_data)
+                            n, c = pool.pop()
+                            tiles_in_play.append(Tile(n, c, 50, RACK_START_Y, current_player))
                             current_player = 3 - current_player
-                            status_msg = f"P{current_player}'s Turn"
+                            sort_hand(current_player, "number")
+                            ghost_data = snapshot_board()
 
-                    # tile pick up
-                    for t in reversed(tiles_in_play):
-                        if t.rect.collidepoint(event.pos) and t.owner in [0, current_player]:
-                            selected_tile = t
-                            t.dragging = True
-                            off_x = t.rect.x - event.pos[0]
-                            off_y = t.rect.y - event.pos[1]
-                            tiles_in_play.remove(t)
-                            tiles_in_play.append(t)
-                            break
+                        if btns["pass"].collidepoint(event.pos):
+                            all_groups = get_all_board_groups(tiles_in_play)
+                            is_board_valid = all(validate_group(g) for g in all_groups)
 
-                # --- DROP TILE with nearest empty grid search ---
+                            board_tiles_now = [t for t in tiles_in_play if t.owner == 0]
+                            prev_board_positions = {(n, c, x, y) for (n, c, x, y) in ghost_data}
+
+                            new_tiles = []
+                            for t in board_tiles_now:
+                                key = (t.number, t.color_val, t.rect.x, t.rect.y)
+                                if key not in prev_board_positions:
+                                    new_tiles.append(t)
+
+                            new_pts = sum(t.number for t in new_tiles)
+
+                            if not is_board_valid:
+                                status_msg = "Invalid Board! Rearrangement failed."
+                                restore_board_from_snapshot(ghost_data)
+                            elif not player_initials[current_player] and new_pts < 30:
+                                status_msg = f"First move needs 30 pts! ({new_pts}/30)"
+                                restore_board_from_snapshot(ghost_data)
+                            else:
+                                if not player_initials[current_player] and new_pts >= 30:
+                                    player_initials[current_player] = True
+
+                                ghost_data = snapshot_board()
+                                current_player = 3 - current_player
+                                status_msg = f"P{current_player}'s Turn"
+
+                        # tile pick up
+                        for t in reversed(tiles_in_play):
+                            if t.rect.collidepoint(event.pos) and t.owner in [0, current_player]:
+                                selected_tile = t
+                                t.dragging = True
+                                off_x = t.rect.x - event.pos[0]
+                                off_y = t.rect.y - event.pos[1]
+                                tiles_in_play.remove(t)
+                                tiles_in_play.append(t)
+                                break
+
+                # drop tile with nearest empty grid
                 if event.type == pygame.MOUSEBUTTONUP and selected_tile:
                     selected_tile.dragging = False
-
-                    # snap to grid first
                     selected_tile.snap()
                     selected_tile.owner = 0 if selected_tile.rect.y < BOARD_BOUNDARY else current_player
 
-                    # find nearest free snapped position
                     new_x, new_y = find_nearest_empty_grid(selected_tile)
                     selected_tile.rect.x = new_x
                     selected_tile.rect.y = new_y
@@ -391,9 +432,9 @@ def main():
         elif state == "PLAYING":
             pygame.draw.rect(screen, (20, 80, 20), (0, BOARD_BOUNDARY, SCREEN_WIDTH, 350))
 
-            # ghost board tiles
-            for g in ghost_data:
-                Tile(g[0], g[1], g[2], g[3], 0).draw(screen, font, 60)
+            # ghost board tiles (last legal snapshot)
+            for n, c, x, y in ghost_data:
+                Tile(n, c, x, y, 0).draw(screen, font, 60)
 
             # player turn indicator and initial-30 status
             p_col = (255, 100, 100) if current_player == 1 else (100, 100, 255)
@@ -416,10 +457,50 @@ def main():
 
             screen.blit(font.render(status_msg, True, (255, 255, 0)), (20, 20))
 
-            # tiles
+            # tiles (current view)
             for t in tiles_in_play:
                 if t.owner in [0, current_player]:
                     t.draw(screen, font)
+
+            # sort mode popup overlay
+            if sort_mode_select:
+                overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+                overlay.fill((0, 0, 0, 180))
+                screen.blit(overlay, (0, 0))
+
+                prompt = big_font.render("SORT TILES BY:", True, (255, 255, 255))
+                screen.blit(prompt, prompt.get_rect(center=(SCREEN_WIDTH // 2, 230)))
+
+                pygame.draw.rect(screen, (80, 80, 80), sort_btn_number, border_radius=10)
+                pygame.draw.rect(screen, (80, 80, 80), sort_btn_color, border_radius=10)
+                txt_num = font.render("NUMBER", True, (255, 255, 255))
+                txt_col = font.render("COLOR", True, (255, 255, 255))
+                screen.blit(txt_num, txt_num.get_rect(center=sort_btn_number.center))
+                screen.blit(txt_col, txt_col.get_rect(center=sort_btn_color.center))
+
+        elif state == "PAUSED":
+            # dim the current screen
+            overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+            overlay.fill((0, 0, 0, 180))
+            screen.blit(overlay, (0, 0))
+
+            title = title_font.render("PAUSED", True, (255, 255, 255))
+            screen.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, 200)))
+
+            for key, rect in pause_btns.items():
+                color = (100, 100, 100) if rect.collidepoint(mouse_pos) else (70, 70, 70)
+                pygame.draw.rect(screen, color, rect, border_radius=10)
+                label = key.upper()
+                if key == "home":
+                    label = "HOME SCREEN"
+                elif key == "rules":
+                    label = "RULES"
+                elif key == "resume":
+                    label = "RESUME"
+                elif key == "restart":
+                    label = "RESTART"
+                txt = font.render(label, True, (255, 255, 255))
+                screen.blit(txt, txt.get_rect(center=rect.center))
 
         pygame.display.flip()
         clock.tick(60)
@@ -429,3 +510,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
